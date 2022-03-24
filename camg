@@ -1,0 +1,157 @@
+#!/bin/bash
+usage() {
+  echo "Usage: camg [-h]" 2>&1
+  exit 0
+}
+[ $# -eq 0 ] && usage
+opensslPath="$(which openssl)"
+pwgenPath=$(which pwgen)
+sedPath=$(which sed)
+createPassphrase() {
+  echo "Generating 512 characters passphrase."
+  $pwgenPath -c -n -y -s -B -c 512 1 > passphrase
+}
+createPkey() {
+  echo "Generating private key."
+  $opensslPath ecparam -name secp521r1 -genkey -noout -param_enc named_curve -outform pem -out pk.pem
+}
+createEpkey() {
+  echo "Generating encrypted private key."
+  $opensslPath ec -aes-256-cbc -inform pem -in pk.pem -outform pem -out epk.pem -passout file:passphrase
+}
+GenCSR() {
+  echo "Generating CSR file."
+  $opensslPath req -new -config settings.conf -key epk.pem -outform pem -out csr.pem -passin file:passphrase
+}
+GenCRLRoot() {
+  echo "Generating CRL file."
+  $opensslPath ca -config settings.conf -gencrl -keyfile epk.pem -cert crt.pem -out crl.pem -passin file:passphrase
+  echo "Creating CA bundle."
+  cat crt.pem crl.pem > ca-bundle.pem
+}
+GenFolder() {
+  echo "Generating empty signed and serial and indices folder."
+  mkdir signed serials indices req
+}
+GenFile() {
+  touch indices/index crlnumber
+  GenSerial > serials/serial
+  echo 00 > crlnumber
+}
+GenSerial() {
+  echo "$($pwgenPath -r FGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0 1 1)$($pwgenPath -r GHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz 39 1)"
+}
+selfsign() {
+  days=$(calcDays)
+  serialHex=$(GenSerial)
+  serialDec=$(echo "obase=10; ibase=16; $serialHex" | bc)
+  echo "Generate serial: $serialHex"
+  $opensslPath x509 -req -inform pem -in csr.pem -extfile settings.conf -sha512 -extensions self -signkey epk.pem -outform pem -out crt.pem -set_serial "$serialDec" -days "$days" -passin file:passphrase
+}
+signCertRoot() {
+  if [ -f "req/csr.pem" ]; then
+    echo "Certificate Request file exist."
+  else
+    echo "Certificate Request file not found."
+    exit 0
+  fi
+  crtEndDate="$(date -j -f "%b %d %T %Y %Z" "$(openssl x509 -in crt.pem -noout -enddate | cut -d'=' -f2)" "+%Y")"
+  thisYear=$(date "+%Y")
+  remainYear="$(( crtEndDate - thisYear ))"
+  if [ $remainYear -lt 4 ]; then
+    echo "This CA no longer accept any request."
+    exit 1
+  fi
+  endDate="$(date -v+3y "+%Y")1231155959Z"
+  echo "Signing CRT file from CSR file"
+  $opensslPath ca -batch -config settings.conf -extensions leaf -enddate $endDate -out "req/crt.pem" -infiles "req/csr.pem"
+  echo "Copy self CRT file for subject."
+  cp crt.pem req/rootcrt.pem
+  if [ -f root ]; then
+    GenCRLRoot
+  fi
+}
+revokeCertRoot() {
+  revokeFilePath="signed/$(echo $1 | sed -e "s/://g").pem"
+  if [ -f "$revokeFilePath" ]; then
+    echo "Certificate exist."
+  else
+    echo "Certificate not found."
+    exit 0
+  fi
+  echo "Revoking CRT file by serial."
+  $opensslPath ca -config settings.conf -revoke "$revokeFilePath" -cert crt.pem
+  if [ -f root ]; then
+    GenCRLRoot
+  fi
+}
+verifyCert() {
+  $opensslPath verify -CAfile crt.pem -CRLfile crl.pem -crl_check "$certFilePath"
+}
+calcDays() {
+  today=$(date "+%s")
+  thisYear=$(date "+%Y")
+  decade=$(( thisYear / 10 ))
+  remainYear=$(( 10 - thisYear % 10 ))
+  if [ $remainYear -lt 3 ]; then
+    decade=$(( $decade + 2))
+  else
+    decade=$(( $decade + 1))
+  fi
+  endYear=$(( $decade * 10 ))
+  endDate=$(date -v$((endYear))y -v12m -v31d -v23H -v59M -v59S "+%s")
+  remainDate=$(((endDate - today ) / 86400))
+  echo $remainDate
+}
+InitRootCA() {
+  touch root
+  createPassphrase
+  GenFolder
+  GenFile
+  createPkey
+  createEpkey
+  GenCSR
+  selfsign
+  GenCRLRoot
+}
+while getopts "hi:sr:v:c" argv; do
+  case "${argv}" in
+    h)
+      usage
+      ;;
+    i)
+      case "${OPTARG}" in
+        r | root)
+          InitRootCA
+          ;;
+        i | intermediate)
+
+          ;;
+        c | certificate)
+
+          ;;
+      esac
+      ;;
+    s)
+      signCertRoot
+      ;;
+    r)
+      revokeFileSerial="${OPTARG}"
+      revokeCertRoot "$revokeFileSerial"
+      ;;
+    v)
+      certFilePath="${OPTARG}"
+      if ! [ -f "$certFilePath" ]; then
+        echo "CRT file not exist."
+        exit 0
+      fi
+      verifyCert "$certFilePath"
+      ;;
+    c)
+      find . ! \( -name "camg" -o -name "settings.conf" \) -delete
+      ;;
+    *)
+      usage
+      ;;
+  esac
+done
