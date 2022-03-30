@@ -88,9 +88,6 @@ signCert() {
   fi
   GenCRL
 }
-signCertIntermediate() {
-  thisYear=$(date "+%Y")
-}
 revokeCertRoot() {
   revokeFilePath="signed/$(echo $1 | sed -e "s/://g").pem"
   if [ -f "$revokeFilePath" ]; then
