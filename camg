@@ -7,6 +7,8 @@ usage() {
 opensslPath="$(which openssl)"
 pwgenPath=$(which pwgen)
 sedPath=$(which sed)
+unset mode
+mode=""
 createPassphrase() {
   echo "Generating 512 characters passphrase."
   $pwgenPath -c -n -y -s -B -c 512 1 > passphrase
@@ -23,11 +25,19 @@ GenCSR() {
   echo "Generating CSR file."
   $opensslPath req -new -config settings.conf -key epk.pem -outform pem -out csr.pem -passin file:passphrase
 }
-GenCRLRoot() {
-  echo "Generating CRL file."
-  $opensslPath ca -config settings.conf -gencrl -keyfile epk.pem -cert crt.pem -out crl.pem -passin file:passphrase
-  echo "Creating CA bundle."
-  cat crt.pem crl.pem > ca-bundle.pem
+GenCRL() {
+  if [ "$mode" = "certificate" ]; then
+    printf "\e[38;5;9mError\e[0m Mode is $mode. No need to generate\n"
+  else
+    echo "Generating CRL file."
+    $opensslPath ca -config settings.conf -gencrl -keyfile epk.pem -cert crt.pem -out crl.pem -passin file:passphrase
+    echo "Creating CA bundle."
+    if [ "$mode" = "root" ]; then
+      cat crt.pem crl.pem > ca-crl-bundle.pem
+    else
+      cat crt.pem rootcrt.pem crl.pem > ca-crl-bundle.pem
+    fi
+  fi
 }
 GenFolder() {
   echo "Generating empty signed and serial and indices folder."
@@ -67,9 +77,12 @@ signCertRoot() {
   $opensslPath ca -batch -config settings.conf -extensions leaf -enddate $endDate -out "req/crt.pem" -infiles "req/csr.pem"
   echo "Copy self CRT file for subject."
   cp crt.pem req/rootcrt.pem
-  if [ -f root ]; then
-    GenCRLRoot
+  if [ "$mode" = "root" ]; then
+    GenCRL
   fi
+}
+signCertIntermediate() {
+  thisYear=$(date "+%Y")
 }
 revokeCertRoot() {
   revokeFilePath="signed/$(echo $1 | sed -e "s/://g").pem"
@@ -88,6 +101,31 @@ revokeCertRoot() {
 verifyCert() {
   $opensslPath verify -CAfile crt.pem -CRLfile crl.pem -crl_check "$certFilePath"
 }
+getMode() {
+  if [ -f root ]; then
+      mode="root"
+  fi
+  if [ -f intermediate ]; then
+    if [ -z mode ]; then
+      mode="intermediate"
+    else
+      printf "\e[38;5;9mError\e[0m Mode already set to $mode. please check that reserve filename root, intermediate and certificate cannot be exist and the same time\n"
+      exit 1
+    fi
+  fi
+  if [ -f certificate ]; then
+    if [ -z mode ]; then
+      mode="certificate"
+    else
+      printf "\e[38;5;9mError\e[0m Mode already set to $mode. please check that reserve filename root, intermediate and certificate cannot be exist and the same time\n"
+      exit 1
+    fi
+  fi
+  if [ -z mode ]; then
+    printf "\e[38;5;9mError\e[0m Mode unset."
+    exit 1
+  fi
+}
 calcDays() {
   today=$(date "+%s")
   thisYear=$(date "+%Y")
@@ -103,49 +141,74 @@ calcDays() {
   remainDate=$(((endDate - today ) / 86400))
   echo $remainDate
 }
-InitRootCA() {
-  touch root
+init() {
+  getMode
   createPassphrase
-  GenFolder
-  GenFile
+  if [ "$mode" != "certificate" ]; then
+    GenFolder
+    GenFile
+  fi
   createPkey
   createEpkey
   GenCSR
-  selfsign
-  GenCRLRoot
+  if [ $mode = "root" ]; then
+    selfsign
+    GenCRL
+  fi
 }
-while getopts "hi:sr:v:c" argv; do
+while getopts "hdli:sr:v:c" argv; do
   case "${argv}" in
     h)
       usage
       ;;
+    d)
+      set -x
+      ;;
     i)
       case "${OPTARG}" in
         r | root)
-          InitRootCA
+          touch root
+          init
           ;;
         i | intermediate)
-
+          touch intermediate
+          init
           ;;
         c | certificate)
-
+          touch certificate
+          init
+          ;;
+        *)
+          printf "\e[38;5;9mError\e[0m No mode set.\n"
+          usage
           ;;
       esac
       ;;
     s)
-      signCertRoot
+      getMode
+      if [ -f root ]; then
+        signCertRoot
+      elif [ -f intermediate ]; then
+        signCertIntermediate
+      fi
       ;;
     r)
+      getMode
       revokeFileSerial="${OPTARG}"
       revokeCertRoot "$revokeFileSerial"
       ;;
     v)
+      getMode
       certFilePath="${OPTARG}"
       if ! [ -f "$certFilePath" ]; then
         echo "CRT file not exist."
         exit 0
       fi
       verifyCert "$certFilePath"
+      ;;
+    l)
+      getMode
+      GenCRL
       ;;
     c)
       find . ! \( -name "camg" -o -name "settings.conf" \) -delete
