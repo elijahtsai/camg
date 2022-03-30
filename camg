@@ -58,7 +58,7 @@ selfsign() {
   echo "Generate serial: $serialHex"
   $opensslPath x509 -req -inform pem -in csr.pem -extfile settings.conf -sha512 -extensions self -signkey epk.pem -outform pem -out crt.pem -set_serial "$serialDec" -days "$days" -passin file:passphrase
 }
-signCertRoot() {
+signCert() {
   if [ -f "req/csr.pem" ]; then
     echo "Certificate Request file exist."
   else
@@ -68,18 +68,25 @@ signCertRoot() {
   crtEndDate="$(date -j -f "%b %d %T %Y %Z" "$(openssl x509 -in crt.pem -noout -enddate | cut -d'=' -f2)" "+%Y")"
   thisYear=$(date "+%Y")
   remainYear="$(( crtEndDate - thisYear ))"
-  if [ $remainYear -lt 4 ]; then
-    echo "This CA no longer accept any request."
+  local limityear=0
+  if [ "$mode" = "root" ]; then
+    limityear=4
+    endDate="$(date -v+3y "+%Y")1231155959Z"
+  else 
+    limityear=1
+    endDate="$(date -v+1y "+%Y")1231155959Z"
+  fi
+  if [ $remainYear -lt $limityear ]; then
+    printf "\e[38;5;9mError\e[0m This CA no longer accept any request.\n"
     exit 1
   fi
-  endDate="$(date -v+3y "+%Y")1231155959Z"
   echo "Signing CRT file from CSR file"
   $opensslPath ca -batch -config settings.conf -extensions leaf -enddate $endDate -out "req/crt.pem" -infiles "req/csr.pem"
-  echo "Copy self CRT file for subject."
-  cp crt.pem req/rootcrt.pem
   if [ "$mode" = "root" ]; then
-    GenCRL
+    echo "Copy self CRT file for subject."
+    cp crt.pem req/rootcrt.pem
   fi
+  GenCRL
 }
 signCertIntermediate() {
   thisYear=$(date "+%Y")
@@ -106,7 +113,7 @@ getMode() {
       mode="root"
   fi
   if [ -f intermediate ]; then
-    if [ -z mode ]; then
+    if [ -z $mode ]; then
       mode="intermediate"
     else
       printf "\e[38;5;9mError\e[0m Mode already set to $mode. please check that reserve filename root, intermediate and certificate cannot be exist and the same time\n"
@@ -114,16 +121,12 @@ getMode() {
     fi
   fi
   if [ -f certificate ]; then
-    if [ -z mode ]; then
+    if [ -z $mode ]; then
       mode="certificate"
     else
       printf "\e[38;5;9mError\e[0m Mode already set to $mode. please check that reserve filename root, intermediate and certificate cannot be exist and the same time\n"
       exit 1
     fi
-  fi
-  if [ -z mode ]; then
-    printf "\e[38;5;9mError\e[0m Mode unset."
-    exit 1
   fi
 }
 calcDays() {
@@ -186,10 +189,10 @@ while getopts "hdli:sr:v:c" argv; do
       ;;
     s)
       getMode
-      if [ -f root ]; then
-        signCertRoot
-      elif [ -f intermediate ]; then
-        signCertIntermediate
+      if [ "$mode" != "certificate" ]; then
+        signCert
+      else
+        printf "\e[38;5;9mError\e[0m Mode is $mode. Cannot be use for signing certificate.\n"
       fi
       ;;
     r)
