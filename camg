@@ -32,9 +32,7 @@ GenCRL() {
     echo "Generating CRL file."
     $opensslPath ca -config settings.conf -gencrl -keyfile epk.pem -cert crt.pem -out crl.pem -passin file:passphrase
     echo "Creating CA bundle."
-    if [ "$mode" = "root" ]; then
-      cat crt.pem crl.pem > ca-crl-bundle.pem
-    else
+    if [ "$mode" = "intermediate" ]; then
       cat crt.pem rootcrt.pem crl.pem > ca-crl-bundle.pem
     fi
   fi
@@ -88,8 +86,8 @@ signCert() {
   fi
   GenCRL
 }
-revokeCertRoot() {
-  revokeFilePath="signed/$(echo $1 | sed -e "s/://g").pem"
+revokeCert() {
+  local revokeFilePath="signed/$(echo $1 | sed -e "s/://g").pem"
   if [ -f "$revokeFilePath" ]; then
     echo "Certificate exist."
   else
@@ -97,13 +95,20 @@ revokeCertRoot() {
     exit 0
   fi
   echo "Revoking CRT file by serial."
-  $opensslPath ca -config settings.conf -revoke "$revokeFilePath" -cert crt.pem
-  if [ -f root ]; then
-    GenCRLRoot
-  fi
+  $opensslPath ca -config settings.conf -revoke "$revokeFilePath" -keyfile epk.pem -cert crt.pem -passin file:passphrase
+  GenCRL
 }
 verifyCert() {
-  $opensslPath verify -CAfile crt.pem -CRLfile crl.pem -crl_check "$certFilePath"
+  
+  local certFilePath="$1"
+
+  if [ "$mode" = "root" ]; then
+    $opensslPath verify -CAfile crt.pem -CRLfile crl.pem -crl_check "$certFilePath"
+  elif [ "$mode" = "intermediate" ]; then
+    $opensslPath verify -CAfile ca-crl-bundle.pem -crl_check "$certFilePath"
+  else
+    echo "No set for certificate mode."
+  fi
 }
 getMode() {
   if [ -f root ]; then
@@ -194,8 +199,7 @@ while getopts "hdli:sr:v:c" argv; do
       ;;
     r)
       getMode
-      revokeFileSerial="${OPTARG}"
-      revokeCertRoot "$revokeFileSerial"
+      revokeCert "${OPTARG}"
       ;;
     v)
       getMode
